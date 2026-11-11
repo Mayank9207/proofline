@@ -10,7 +10,7 @@
 // Nothing tracks edits as they happen. Save reads the report from Studio with getState(), and
 // leaving a report compares Studio's state with the saved one there and then.
 
-import { useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
   AgStudioAiModule,
   enableStudioDevValidations,
@@ -19,7 +19,7 @@ import {
   type AgStudioMode,
 } from 'ag-studio';
 import { AgStudio, AgStudioProvider } from 'ag-studio-react';
-import type { DashboardData } from '@/lib/dashboard-data';
+import type { ProoflineData as DashboardData } from '@/lib/store';
 import { AppShell } from './components/app-shell';
 import {
   CreateReportDialog,
@@ -45,9 +45,10 @@ import { pagesFor, pageTitlesFor } from './page-titles';
 import { ReportsSidebar } from './components/sidebar';
 import { DashboardSkeleton } from './components/skeleton';
 import * as reportState from './report-state';
-import { buildAi } from './studio/ai';
+import { buildAi, setAiData } from './studio/ai';
 import { buildStudioData, hasData } from './studio/data';
 import { agStudioPayPalTheme } from './studio/theme';
+import { prooflineWidgets } from './studio/widgets';
 import { useReports } from './use-reports';
 
 if (process.env.NODE_ENV !== 'production') {
@@ -57,8 +58,8 @@ if (process.env.NODE_ENV !== 'production') {
 type DashboardProps = {
   data: DashboardData;
   licenseKey?: string;
-  /** OpenAI models the assistant may use; omitted when no key is configured, which hides the assistant. */
-  aiModels?: string[];
+  /** Whether the server has an AI provider configured (lib/ai.ts); false hides the assistant. */
+  aiEnabled?: boolean;
 };
 
 type StudioHistory = { canUndo: boolean; canRedo: boolean };
@@ -77,7 +78,7 @@ export function Dashboard(props: DashboardProps) {
   return inBrowser ? <ReportsDashboard {...props} /> : <DashboardSkeleton />;
 }
 
-function ReportsDashboard({ data, licenseKey, aiModels }: DashboardProps) {
+function ReportsDashboard({ data, licenseKey, aiEnabled }: DashboardProps) {
   const { store, latest, update, editReport } = useReports();
   const apiRef = useRef<AgStudioApi | null>(null);
 
@@ -96,8 +97,9 @@ function ReportsDashboard({ data, licenseKey, aiModels }: DashboardProps) {
   const [initialState] = useState(() => reportState.withFiltersPanelFor('view', saved.state));
   const state = studioState ?? initialState;
   const studioData = useMemo(() => buildStudioData(data), [data]);
-  // `ai` is read once, when Studio is created.
-  const ai = useMemo(() => (aiModels?.length ? buildAi(aiModels) : undefined), [aiModels]);
+  // `ai` is read once, when Studio is created; its data tool reads whatever data was set last.
+  const ai = useMemo(() => (aiEnabled ? buildAi() : undefined), [aiEnabled]);
+  useEffect(() => setAiData(data), [data]);
 
   // --- Driving Studio ---------------------------------------------------------------
   const load = (
@@ -263,6 +265,7 @@ function ReportsDashboard({ data, licenseKey, aiModels }: DashboardProps) {
               theme={agStudioPayPalTheme}
               layout={{ widgetBorderEnabled: true }}
               data={studioData}
+              widgets={prooflineWidgets as never}
               ai={ai}
               initialState={initialState}
               mode={mode}
