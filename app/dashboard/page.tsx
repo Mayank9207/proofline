@@ -1,24 +1,24 @@
 import type { Metadata } from "next";
 import { connection } from "next/server";
-import { aiEnabled, aiModels } from "@/lib/ai";
-import { getDashboardData } from "@/lib/dashboard-data";
+import { aiEnabled } from "@/lib/ai";
+import { getProoflineData } from "@/lib/store";
 import { Dashboard } from "./dashboard";
 
 export const metadata: Metadata = {
-  title: "Dashboard",
+  title: "Proofline command center",
 };
 
 export default async function DashboardPage() {
-  // Live PayPal data: render per request, not at build time.
+  // The evidence ledger changes as payments, deliveries and webhooks arrive: render per request.
   await connection();
-  const data = await getDashboardData();
+  const data = getProoflineData();
 
-  // Only the model ids reach the client; the OpenAI key stays on the server (lib/ai.ts).
+  // Only a yes/no reaches the client; the provider, model and keys stay on the server (lib/ai.ts).
   return (
     <Dashboard
       data={data}
       licenseKey={process.env.AG_STUDIO}
-      aiModels={aiEnabled() ? aiModels() : undefined}
+      aiEnabled={aiEnabled()}
     />
   );
 }

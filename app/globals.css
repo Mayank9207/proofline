@@ -61,3 +61,12 @@ body {
   --color-pp-danger: var(--pp-danger);
   --font-paypal: var(--pp-font);
 }
+
+/*
+ * AG Studio hides its chat Stop button whenever the conversation is scrolled up from the bottom.
+ * Keep it visible for as long as a run is in progress ("Thinking…" showing), so a run can always
+ * be stopped. The click still goes to Studio's own cancel.
+ */
+.ag-studio-ai-status-bar:has(.ag-studio-ai-status-bar-thinking:not(.ag-hidden)) .ag-studio-ai-status-bar-stop.ag-hidden {
+  display: inline-flex !important;
+}

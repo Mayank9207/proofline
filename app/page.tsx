@@ -1,40 +1,74 @@
 import Link from 'next/link';
+import { connection } from 'next/server';
+import { listProjects, projectPosture } from '@/lib/store';
+import { createProjectAction } from './actions';
+import { Header, SampleBadge, Section, money } from './ui';
 
-const dashboard = { href: '/dashboard', label: 'Dashboard', detail: 'AG Studio reports over all of the data below' };
+export default async function Home() {
+  await connection();
+  const postures = listProjects().map((p) => projectPosture(p));
+  const atRisk = postures.filter((x) => x.project.paid_at && x.gaps.length > 0);
 
-// One page per PayPal endpoint the demo calls, each in app/(endpoints).
-const endpoints = [
-  { href: '/products', label: 'Catalog products', detail: 'GET /v1/catalogs/products' },
-  { href: '/plans', label: 'Billing plans', detail: 'GET /v1/billing/plans' },
-  { href: '/invoices', label: 'Invoices', detail: 'GET /v2/invoicing/invoices' },
-  { href: '/transactions', label: 'Transactions', detail: 'GET /v1/reporting/transactions' },
-  { href: '/balances', label: 'Balances', detail: 'GET /v1/reporting/balances' },
-];
-
-function PageLink({ href, label, detail }: { href: string; label: string; detail: string }) {
   return (
-    <li>
-      <Link href={href} className="flex items-baseline justify-between gap-4 py-3 hover:text-pp-blue">
-        <span className="font-semibold">{label} →</span>
-        <code className="text-sm text-pp-muted">{detail}</code>
-      </Link>
-    </li>
-  );
-}
+    <>
+      <Header />
+      <main className="mx-auto max-w-5xl px-6 pb-16">
+        <div className="mt-8">
+          <h1 className="text-2xl font-semibold text-pp-navy">Your PayPal-paid work, ready to prove</h1>
+          <p className="mt-2 max-w-3xl text-pp-muted">
+            When PayPal holds a payment, reviews an account or opens a dispute, sellers of digital work are asked for proof of
+            fulfillment that usually lives in scattered chats. Proofline keeps that proof on file for every project as the work
+            happens, with where each item came from and a fingerprint that shows it hasn’t changed.
+          </p>
+          <p className="mt-3 text-sm font-semibold text-pp-danger">
+            {atRisk.length} paid project{atRisk.length === 1 ? '' : 's'} missing evidence ·{' '}
+            {money(atRisk.reduce((s, x) => s + x.project.price, 0))} at risk
+          </p>
+        </div>
 
-export default function Home() {
-  return (
-    <main className="mx-auto w-full max-w-3xl p-16 font-paypal text-pp-ink">
-      <h1 className="text-[28px] font-semibold text-pp-navy">PayPal REST APIs with AG Grid &amp; AG Studio</h1>
-      <ul className="mt-6 divide-y divide-pp-border border-y border-pp-border">
-        <PageLink {...dashboard} />
-      </ul>
-      <h2 className="mt-10 text-sm font-semibold uppercase tracking-wider text-pp-muted">Endpoints</h2>
-      <ul className="mt-2 divide-y divide-pp-border border-y border-pp-border">
-        {endpoints.map((page) => (
-          <PageLink key={page.href} {...page} />
-        ))}
-      </ul>
-    </main>
+        <Section title="Projects" aside={<Link className="text-sm font-semibold text-pp-blue" href="/dashboard">Open the command center →</Link>}>
+          <table className="w-full text-sm">
+            <thead className="text-left text-pp-muted">
+              <tr>
+                <th className="py-2">Project</th>
+                <th>Client</th>
+                <th>Status</th>
+                <th className="text-right">Price</th>
+                <th className="text-right">Evidence</th>
+                <th>Missing</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-pp-border">
+              {postures.map(({ project: p, items, gaps, score }) => (
+                <tr key={p.id}>
+                  <td className="py-2">
+                    <Link className="font-semibold text-pp-blue hover:underline" href={`/projects/${p.id}`}>{p.title}</Link>{' '}
+                    {p.seeded === 1 && <SampleBadge />}
+                  </td>
+                  <td>{p.client_name}</td>
+                  <td className="capitalize">{p.status.replace('_', ' ')}</td>
+                  <td className="text-right">{money(p.price, p.currency)}</td>
+                  <td className="text-right">{items.length} · {Math.round(score * 100)}%</td>
+                  <td className={gaps.length ? 'text-pp-danger' : 'text-pp-success'}>
+                    {gaps.length ? gaps.map((g) => g.label).join(', ') : 'Nothing missing'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Section>
+
+        <Section title="New project">
+          <form action={createProjectAction} className="grid grid-cols-2 gap-3 text-sm">
+            <input required name="title" placeholder="Project title" className="rounded border border-pp-border px-3 py-2" />
+            <input required name="price" type="number" min="1" step="0.01" placeholder="Price (USD)" className="rounded border border-pp-border px-3 py-2" />
+            <input required name="clientName" placeholder="Client name" className="rounded border border-pp-border px-3 py-2" />
+            <input required name="clientEmail" type="email" placeholder="Client email" className="rounded border border-pp-border px-3 py-2" />
+            <textarea required name="scope" rows={3} placeholder="Agreed scope: what you will deliver, by when, how many revisions" className="col-span-2 rounded border border-pp-border px-3 py-2" />
+            <button className="col-span-2 justify-self-start rounded bg-pp-blue px-4 py-2 font-semibold text-white hover:bg-pp-blue-dark">Create project</button>
+          </form>
+        </Section>
+      </main>
+    </>
   );
 }

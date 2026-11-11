@@ -221,3 +221,174 @@ export type Balances = {
 export function getBalances(): Promise<Balances> {
   return get<Balances>('/v1/reporting/balances');
 }
+
+// --- Proofline: writes ------------------------------------------------------------------
+// Every write carries a PayPal-Request-Id, so a retried call (ours or a double click) is applied
+// once by PayPal.
+
+async function send<T>(method: 'POST' | 'PATCH', path: string, body: unknown, requestId?: string): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    const res = await fetch(`${BASE_URL}${path}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${await accessToken()}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+        ...(requestId && { 'PayPal-Request-Id': requestId }),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      cache: 'no-store',
+    });
+    if (res.ok) {
+      const text = await res.text();
+      return (text ? JSON.parse(text) : {}) as T;
+    }
+    if (res.status === 401 && attempt === 1) {
+      cachedToken = undefined;
+      continue;
+    }
+    if ((res.status === 429 || res.status >= 500) && attempt < MAX_ATTEMPTS) {
+      await new Promise((resolve) => setTimeout(resolve, 2 ** attempt * 250));
+      continue;
+    }
+    throw new PayPalApiError(res.status, path, await res.text());
+  }
+}
+
+type Link = { href: string; rel: string; method?: string };
+
+export type Capture = {
+  id: string;
+  status: string;
+  amount: Money;
+  status_details?: { reason?: string };
+  seller_protection?: { status?: string; dispute_categories?: string[] };
+  create_time?: string;
+  custom_id?: string;
+};
+
+export type Order = {
+  id: string;
+  status: string;
+  links?: Link[];
+  purchase_units?: { custom_id?: string; payments?: { captures?: Capture[] } }[];
+};
+
+/** A checkout order the client approves in PayPal; `custom_id` ties it to the project. */
+export async function createOrder(input: {
+  projectId: string;
+  description: string;
+  amount: number;
+  currency: string;
+  returnUrl: string;
+  cancelUrl: string;
+}) {
+  const order = await send<Order>(
+    'POST',
+    '/v2/checkout/orders',
+    {
+      intent: 'CAPTURE',
+      purchase_units: [
+        {
+          reference_id: input.projectId,
+          custom_id: input.projectId,
+          description: input.description.slice(0, 127),
+          amount: { currency_code: input.currency, value: input.amount.toFixed(2) },
+        },
+      ],
+      payment_source: {
+        paypal: {
+          experience_context: {
+            shipping_preference: 'NO_SHIPPING',
+            user_action: 'PAY_NOW',
+            return_url: input.returnUrl,
+            cancel_url: input.cancelUrl,
+          },
+        },
+      },
+    },
+    `proofline-order-${input.projectId}-${Date.now()}`,
+  );
+  const approve = order.links?.find((l) => l.rel === 'payer-action' || l.rel === 'approve')?.href;
+  return { order, approveUrl: approve };
+}
+
+export const captureOrder = (orderId: string) =>
+  send<Order>('POST', `/v2/checkout/orders/${orderId}/capture`, {}, `proofline-capture-${orderId}`);
+
+export const getOrder = (orderId: string) => get<Order>(`/v2/checkout/orders/${orderId}`);
+
+export const getCapture = (captureId: string) => get<Capture>(`/v2/payments/captures/${captureId}`);
+
+/**
+ * Record a service as completed on a PayPal transaction. PayPal releases held payments for services
+ * after the order is marked completed; a tracker with no carrier and status COMPLETED does that.
+ */
+export const recordServiceCompleted = (captureId: string) =>
+  send<{ tracker_identifiers?: unknown[]; errors?: unknown[] }>(
+    'POST',
+    '/v1/shipping/trackers-batch',
+    { trackers: [{ transaction_id: captureId, status: 'COMPLETED' }] },
+    `proofline-completed-${captureId}`,
+  );
+
+// --- Disputes ----------------------------------------------------------------------------
+
+export type Dispute = {
+  dispute_id: string;
+  reason: string;
+  status: string;
+  dispute_amount?: Money;
+  seller_response_due_date?: string;
+  disputed_transactions?: { seller_transaction_id?: string }[];
+  create_time?: string;
+};
+
+export const listDisputes = () =>
+  get<{ items?: Dispute[] }>('/v1/customer/disputes?page_size=50').then((r) => r.items ?? []);
+
+export const getDispute = (id: string) => get<Dispute>(`/v1/customer/disputes/${id}`);
+
+/** Sandbox only: open a chargeback on a captured transaction, for demos. */
+export const sandboxChargeback = (captureId: string, reason = 'MERCHANDISE_OR_SERVICE_NOT_RECEIVED') =>
+  send<unknown>('POST', '/v2/customer-support/process-chargeback', {
+    transaction_id: captureId,
+    reason,
+  });
+
+/** Send evidence notes for a dispute (text only; files are attached as a multipart part). */
+export async function provideDisputeEvidence(disputeId: string, notes: string, evidenceType = 'PROOF_OF_FULFILLMENT') {
+  const form = new FormData();
+  form.append(
+    'input',
+    new Blob([JSON.stringify({ evidences: [{ evidence_type: evidenceType, notes: notes.slice(0, 2000) }] })], {
+      type: 'application/json',
+    }),
+  );
+  const path = `/v1/customer/disputes/${disputeId}/provide-evidence`;
+  const res = await fetch(`${BASE_URL}${path}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${await accessToken()}` },
+    body: form,
+    cache: 'no-store',
+  });
+  if (!res.ok) throw new PayPalApiError(res.status, path, await res.text());
+  return res.json() as Promise<unknown>;
+}
+
+// --- Webhooks ----------------------------------------------------------------------------
+
+export async function verifyWebhook(headers: Headers, rawBody: string): Promise<boolean> {
+  const webhookId = process.env.PAYPAL_WEBHOOK_ID;
+  if (!webhookId) return false;
+  const result = await send<{ verification_status?: string }>('POST', '/v1/notifications/verify-webhook-signature', {
+    auth_algo: headers.get('paypal-auth-algo'),
+    cert_url: headers.get('paypal-cert-url'),
+    transmission_id: headers.get('paypal-transmission-id'),
+    transmission_sig: headers.get('paypal-transmission-sig'),
+    transmission_time: headers.get('paypal-transmission-time'),
+    webhook_id: webhookId,
+    webhook_event: JSON.parse(rawBody),
+  });
+  return result.verification_status === 'SUCCESS';
+}
