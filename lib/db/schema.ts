@@ -45,6 +45,15 @@ CREATE TABLE IF NOT EXISTS paypal_events (
   received_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
+CREATE TABLE IF NOT EXISTS delivery_links (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  token_hash TEXT NOT NULL UNIQUE,    -- only the SHA-256 of the token is stored; the raw token is shown once
+  expires_at TEXT NOT NULL,
+  revoked_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
 CREATE TABLE IF NOT EXISTS notices (
   id TEXT PRIMARY KEY,
   project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
