@@ -2,19 +2,19 @@ import { db, newId } from './index';
 import type { Project, ProjectStatus } from '@/lib/evidence/types';
 
 type Row = {
-  id: string; client_name: string; client_email: string | null; scope: string; amount: number;
-  currency: string; status: ProjectStatus; paypal_invoice_id: string | null; paypal_capture_id: string | null;
+  id: string; title: string; client_name: string; client_email: string | null; scope: string; amount: number;
+  currency: string; status: ProjectStatus; paypal_order_id: string | null; paypal_capture_id: string | null;
   created_at: string; updated_at: string;
 };
 
 const toProject = (r: Row): Project => ({
-  id: r.id, clientName: r.client_name, clientEmail: r.client_email, scope: r.scope, amount: r.amount,
-  currency: r.currency, status: r.status, paypalInvoiceId: r.paypal_invoice_id,
+  id: r.id, title: r.title, clientName: r.client_name, clientEmail: r.client_email, scope: r.scope, amount: r.amount,
+  currency: r.currency, status: r.status, paypalOrderId: r.paypal_order_id,
   paypalCaptureId: r.paypal_capture_id, createdAt: r.created_at, updatedAt: r.updated_at,
 });
 
 export type NewProject = {
-  id?: string; clientName: string; clientEmail?: string | null; scope: string; amount: number;
+  id?: string; title: string; clientName: string; clientEmail?: string | null; scope: string; amount: number;
   currency: string; status?: ProjectStatus;
 };
 
@@ -30,15 +30,15 @@ export function getProject(id: string): Project | null {
 export function createProject(p: NewProject): Project {
   const id = p.id ?? newId('p');
   db().prepare(
-    `INSERT INTO projects (id, client_name, client_email, scope, amount, currency, status)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).run(id, p.clientName, p.clientEmail ?? null, p.scope, p.amount, p.currency, p.status ?? 'agreed');
+    `INSERT INTO projects (id, title, client_name, client_email, scope, amount, currency, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(id, p.title, p.clientName, p.clientEmail ?? null, p.scope, p.amount, p.currency, p.status ?? 'agreed');
   return getProject(id)!;
 }
 
 const COLUMNS = {
-  clientName: 'client_name', clientEmail: 'client_email', scope: 'scope', amount: 'amount',
-  currency: 'currency', status: 'status', paypalInvoiceId: 'paypal_invoice_id', paypalCaptureId: 'paypal_capture_id',
+  title: 'title', clientName: 'client_name', clientEmail: 'client_email', scope: 'scope', amount: 'amount',
+  currency: 'currency', status: 'status', paypalOrderId: 'paypal_order_id', paypalCaptureId: 'paypal_capture_id',
 } as const;
 
 export function updateProject(id: string, patch: Partial<Pick<Project, keyof typeof COLUMNS>>): Project | null {

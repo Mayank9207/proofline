@@ -16,7 +16,7 @@ export async function GET(_req: Request, { params }: Ctx) {
   return Response.json({
     project: toProjectSummary(project, evidence),
     evidence: evidence.map(toEvidenceDTO),
-    completeness: computeCompleteness(id, evidence),
+    completeness: computeCompleteness(id, evidence, project.status),
   });
 }
 
@@ -34,7 +34,7 @@ export async function DELETE(_req: Request, { params }: Ctx) {
   const { id } = await params;
   const project = getProject(id);
   if (!project) return jsonError(404, 'Project not found.');
-  if (project.paypalInvoiceId || project.paypalCaptureId || ['paid', 'delivered', 'acknowledged', 'completed_recorded', 'closed'].includes(project.status))
+  if (project.paypalOrderId || project.paypalCaptureId || ['paid', 'delivered', 'acknowledged', 'completed_recorded', 'closed'].includes(project.status))
     return jsonError(409, 'Projects with PayPal payments or later lifecycle states cannot be deleted.');
   deleteProject(id);
   return new Response(null, { status: 204 });

@@ -2,6 +2,7 @@
 export const SCHEMA = `
 CREATE TABLE IF NOT EXISTS projects (
   id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
   client_name TEXT NOT NULL,
   client_email TEXT,
   scope TEXT NOT NULL,
@@ -9,9 +10,8 @@ CREATE TABLE IF NOT EXISTS projects (
   currency TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'agreed' CHECK (status IN
     ('agreed','invoiced','paid','delivered','acknowledged','completed_recorded','closed')),
-  paypal_invoice_id TEXT UNIQUE,
+  paypal_order_id TEXT UNIQUE,
   paypal_capture_id TEXT UNIQUE,
-  delivery_token_hash TEXT UNIQUE,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );

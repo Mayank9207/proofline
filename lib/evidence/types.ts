@@ -33,13 +33,14 @@ export type ProjectStatus = (typeof PROJECT_STATUSES)[number];
 
 export type Project = {
   id: string;
+  title: string;
   clientName: string;
   clientEmail: string | null;
   scope: string;
   amount: number; // integer minor units (e.g. 500000 = 5,000.00)
   currency: string;
   status: ProjectStatus;
-  paypalInvoiceId: string | null;
+  paypalOrderId: string | null;
   paypalCaptureId: string | null;
   createdAt: string;
   updatedAt: string;

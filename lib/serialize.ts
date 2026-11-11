@@ -6,6 +6,6 @@ import type { EvidenceItem, Project } from '@/lib/evidence/types';
 export const toEvidenceDTO = ({ storageRef, ...e }: EvidenceItem): EvidenceDTO => ({ ...e, hasFile: storageRef !== null });
 
 export function toProjectSummary(p: Project, evidence: EvidenceItem[]): ProjectSummaryDTO {
-  const c = computeCompleteness(p.id, evidence);
+  const c = computeCompleteness(p.id, evidence, p.status);
   return { ...p, evidenceScore: c.completeness, missingEvidence: c.missingEvidence };
 }

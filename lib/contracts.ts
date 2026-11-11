@@ -8,13 +8,14 @@ export const provenanceSchema = z.enum(PROVENANCE_LEVELS);
 
 export const projectSchema = z.object({
   id: z.string(),
+  title: z.string(),
   clientName: z.string(),
   clientEmail: z.string().nullable(),
   scope: z.string(),
   amount: z.number().int(), // minor units
   currency: z.string(),
   status: projectStatusSchema,
-  paypalInvoiceId: z.string().nullable(),
+  paypalOrderId: z.string().nullable(),
   paypalCaptureId: z.string().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -46,6 +47,7 @@ export const evidenceSchema = z.object({
 export const completenessSchema = z.object({
   projectId: z.string(),
   category: z.string(),
+  status: projectStatusSchema,
   presentEvidence: z.array(evidenceTypeSchema),
   missingEvidence: z.array(evidenceTypeSchema),
   provenance: z.record(z.string(), provenanceSchema),
@@ -53,6 +55,7 @@ export const completenessSchema = z.object({
 });
 
 export const createProjectBody = z.object({
+  title: z.string().min(1).max(200),
   clientName: z.string().min(1).max(200),
   clientEmail: z.string().email().nullish(),
   scope: z.string().min(1).max(2000),
