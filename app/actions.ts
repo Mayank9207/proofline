@@ -1,27 +1,30 @@
 'use server';
 
-// Server actions behind Proofline's pages. Every PayPal write happens here, on the server, and is
-// recorded in the approvals table with the sha256 of the exact payload the seller approved.
+// Server actions behind Proofline's pages. They call the backend's lib functions directly (lib/db/*,
+// lib/evidence/*) and follow the same rules as its API routes: fingerprint the original bytes, keep
+// the original under data/evidence, set provenance from how the evidence arrived, and let sellers
+// file only the evidence types they may file by hand. Every PayPal write is recorded in `approvals`
+// with the sha256 of the exact payload the seller approved.
 
-import { createHash } from 'node:crypto';
 import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { revalidatePath } from 'next/cache';
-import { createOrder, recordServiceCompleted, sandboxChargeback, provideDisputeEvidence, PayPalApiError } from '@/lib/paypal';
-import {
-  addEvidence,
-  advanceStatus,
-  createProject,
-  ensureDeliveryToken,
-  getProject,
-  getProjectByToken,
-  listEvidence,
-  recordApproval,
-  updateProject,
-} from '@/lib/store';
+import { createProjectBody, FREELANCER_EVIDENCE_TYPES } from '@/lib/contracts';
+import { newId } from '@/lib/db';
+import { createDeliveryLink } from '@/lib/db/delivery';
+import { createEvidence, listEvidence } from '@/lib/db/evidence';
+import { createProject, getProject, updateProject } from '@/lib/db/projects';
+import { recordApproval, recordNotice } from '@/lib/db/records';
+import { calculateSHA256 } from '@/lib/evidence/hash';
+import { EVIDENCE_LABELS } from '@/lib/evidence/labels';
+import { provenanceFor, type IngestChannel } from '@/lib/evidence/provenance';
+import { ALLOWED_MIME, MAX_UPLOAD_BYTES, storeOriginal } from '@/lib/evidence/storage';
 import { extractEvidence, mapNotice, type NoticeItem } from '@/lib/ai-tasks';
-import { EVIDENCE_TYPES, sha256, type EvidenceType } from '@/lib/evidence';
-import { getDb, newId, now } from '@/lib/db';
+import { createOrder, recordServiceCompleted, sandboxChargeback, provideDisputeEvidence, PayPalApiError } from '@/lib/paypal';
+import { addPayPalEvidence, advanceStatus, major } from '@/lib/store';
+
+type FreelancerType = (typeof FREELANCER_EVIDENCE_TYPES)[number];
+const isFreelancerType = (v: string): v is FreelancerType => (FREELANCER_EVIDENCE_TYPES as readonly string[]).includes(v);
 
 async function baseUrl() {
   const h = await headers();
@@ -38,21 +41,64 @@ function refresh(projectId?: string) {
   if (projectId) revalidatePath(`/projects/${projectId}`);
 }
 
-export type ActionResult = { ok: boolean; message: string };
+export type ActionResult = { ok: boolean; message: string; url?: string };
+
+/** Store an original the seller supplied and register it as self-reported evidence. */
+async function ingest(e: {
+  projectId: string;
+  type: FreelancerType;
+  title: string;
+  bytes: Buffer;
+  mimeType: string;
+  originalFilename?: string | null;
+  channel: Extract<IngestChannel, 'freelancer_upload' | 'freelancer_paste'>;
+  extractedFacts?: unknown;
+  quotes?: unknown;
+}) {
+  const id = newId('e');
+  const sha256 = calculateSHA256(e.bytes); // the untouched original, before anything else
+  const storageRef = await storeOriginal(e.projectId, id, e.bytes);
+  return createEvidence({
+    id,
+    projectId: e.projectId,
+    type: e.type,
+    title: e.title.slice(0, 200),
+    source: e.channel === 'freelancer_upload' ? 'upload' : 'paste',
+    sha256,
+    storageRef,
+    provenanceLevel: provenanceFor(e.channel),
+    originalFilename: e.originalFilename ?? null,
+    mimeType: e.mimeType,
+    extractedFacts: e.extractedFacts,
+    quotes: e.quotes,
+  });
+}
 
 // --- Projects and evidence --------------------------------------------------------------
 
 export async function createProjectAction(form: FormData) {
   const price = Number(text(form, 'price'));
-  const id = createProject({
+  const parsed = createProjectBody.safeParse({
     title: text(form, 'title'),
     clientName: text(form, 'clientName'),
-    clientEmail: text(form, 'clientEmail'),
+    clientEmail: text(form, 'clientEmail') || null,
     scope: text(form, 'scope'),
-    price: Number.isFinite(price) && price > 0 ? price : 0,
+    amount: Number.isFinite(price) && price > 0 ? Math.round(price * 100) : 0,
+    currency: 'USD',
   });
-  refresh(id);
-  redirect(`/projects/${id}`);
+  if (!parsed.success) throw new Error('Check the project details: every field is required and the price must be a number.');
+  const project = createProject(parsed.data);
+  // The scope as the seller typed it is the first, self-reported, record of the agreement.
+  await ingest({
+    projectId: project.id,
+    type: 'scope_agreement',
+    title: 'Scope entered by seller',
+    bytes: Buffer.from(parsed.data.scope, 'utf8'),
+    mimeType: 'text/plain',
+    channel: 'freelancer_paste',
+  });
+  refresh(project.id);
+  redirect(`/projects/${project.id}`);
 }
 
 export async function addEvidenceAction(projectId: string, _prev: ActionResult | null, form: FormData): Promise<ActionResult> {
@@ -60,55 +106,56 @@ export async function addEvidenceAction(projectId: string, _prev: ActionResult |
   if (!project) return { ok: false, message: 'Project not found.' };
   const pasted = text(form, 'content');
   const file = form.get('file');
-  const chosenType = text(form, 'type') as EvidenceType | 'auto';
+  const picked = text(form, 'type');
+  const title = text(form, 'title');
+  const chosen: FreelancerType | 'auto' | null = picked === 'auto' ? 'auto' : isFreelancerType(picked) ? picked : null;
+  if (!chosen) return { ok: false, message: 'Choose an evidence type you can add yourself.' };
 
-  // A file: fingerprint the bytes. Proofline keeps the fingerprint and description, not the file.
   if (file instanceof File && file.size > 0) {
-    const bytes = Buffer.from(await file.arrayBuffer());
-    const type: EvidenceType = chosenType === 'auto' ? 'delivery_file' : chosenType;
-    addEvidence({
+    if (file.size > MAX_UPLOAD_BYTES) return { ok: false, message: `The file is over ${MAX_UPLOAD_BYTES / 1024 / 1024} MB.` };
+    if (!ALLOWED_MIME.has(file.type)) return { ok: false, message: `Files of type "${file.type || 'unknown'}" are not accepted. Use an image, PDF, text or zip file.` };
+    await ingest({
       projectId,
-      type,
-      title: text(form, 'title') || file.name,
-      content: `${file.name} (${file.size} bytes, ${file.type || 'unknown type'})`,
-      fileSha256: createHash('sha256').update(bytes).digest('hex'),
-      source: 'upload',
-      provenance: type === 'delivery_file' ? 'system_verified' : 'self_reported',
+      type: chosen === 'auto' ? 'delivery_file' : chosen,
+      title: title || file.name,
+      bytes: Buffer.from(await file.arrayBuffer()),
+      mimeType: file.type,
+      originalFilename: file.name.slice(0, 255),
+      channel: 'freelancer_upload',
     });
-    if (type === 'delivery_file') {
-      updateProject(projectId, { delivered_at: project.delivered_at ?? now() });
-      advanceStatus(project, 'delivered');
-    }
     refresh(projectId);
-    return { ok: true, message: `Fingerprinted ${file.name}.` };
+    return { ok: true, message: `Stored ${file.name} with its sha256 fingerprint.` };
   }
 
   if (!pasted) return { ok: false, message: 'Paste some text or choose a file.' };
+  if (pasted.length > 200_000) return { ok: false, message: 'The pasted text is too long.' };
+  const bytes = Buffer.from(pasted, 'utf8');
 
-  if (chosenType !== 'auto') {
-    addEvidence({ projectId, type: chosenType, title: text(form, 'title') || EVIDENCE_TYPES[chosenType], content: pasted, source: 'paste', provenance: 'self_reported' });
+  if (chosen !== 'auto') {
+    await ingest({ projectId, type: chosen, title: title || EVIDENCE_LABELS[chosen], bytes, mimeType: 'text/plain', channel: 'freelancer_paste' });
     refresh(projectId);
     return { ok: true, message: 'Evidence added.' };
   }
 
   const extraction = await extractEvidence(project, pasted);
   if (!extraction) {
-    addEvidence({ projectId, type: 'other', title: text(form, 'title') || 'Pasted text', content: pasted, source: 'paste', provenance: 'self_reported' });
+    await ingest({ projectId, type: 'other', title: title || 'Pasted text', bytes, mimeType: 'text/plain', channel: 'freelancer_paste' });
     refresh(projectId);
     return { ok: true, message: 'AI is unavailable, so the text was saved unclassified. Choose a type to file it properly.' };
   }
-  addEvidence({
+  await ingest({
     projectId,
     type: extraction.type,
-    title: text(form, 'title') || extraction.title,
-    content: pasted,
-    source: 'paste',
-    provenance: 'self_reported',
-    facts: extraction.statements,
+    title: title || extraction.title,
+    bytes,
+    mimeType: 'text/plain',
+    channel: 'freelancer_paste',
+    extractedFacts: extraction.statements,
+    quotes: extraction.statements.map((s) => s.quote),
   });
   refresh(projectId);
   const dropped = extraction.dropped ? ` ${extraction.dropped} quote(s) not found word for word in your text were discarded.` : '';
-  return { ok: true, message: `Filed as “${EVIDENCE_TYPES[extraction.type]}” with ${extraction.statements.length} verified quote(s).${dropped}` };
+  return { ok: true, message: `Filed as “${EVIDENCE_LABELS[extraction.type]}” with ${extraction.statements.length} verified quote(s).${dropped}` };
 }
 
 // --- PayPal ------------------------------------------------------------------------------
@@ -120,69 +167,69 @@ export async function requestPaymentAction(projectId: string) {
   const { order, approveUrl } = await createOrder({
     projectId,
     description: project.title,
-    amount: project.price,
+    amount: major(project.amount),
     currency: project.currency,
     returnUrl: `${base}/api/paypal/return`,
     cancelUrl: `${base}/projects/${projectId}`,
   });
-  updateProject(projectId, { paypal_order_id: order.id });
-  advanceStatus(project, 'payment_requested');
+  updateProject(projectId, { paypalOrderId: order.id });
+  advanceStatus(project, 'invoiced');
   refresh(projectId);
   if (!approveUrl) throw new Error('PayPal returned no approval link');
   redirect(approveUrl);
 }
 
-export async function createDeliveryLinkAction(projectId: string) {
-  const project = getProject(projectId);
-  if (!project) throw new Error('Project not found');
-  ensureDeliveryToken(project);
-  refresh(projectId);
-}
-
 export async function recordCompletionAction(projectId: string): Promise<ActionResult> {
   const project = getProject(projectId);
-  if (!project?.paypal_capture_id) return { ok: false, message: 'There is no PayPal capture for this project yet.' };
-  const payload = { trackers: [{ transaction_id: project.paypal_capture_id, status: 'COMPLETED' }] };
+  if (!project?.paypalCaptureId) return { ok: false, message: 'There is no PayPal capture for this project yet.' };
+  const payload = { trackers: [{ transaction_id: project.paypalCaptureId, status: 'COMPLETED' }] };
   try {
-    const result = await recordServiceCompleted(project.paypal_capture_id);
-    recordApproval(projectId, 'record_service_completed', sha256(JSON.stringify(payload)), result);
-    addEvidence({
+    const result = await recordServiceCompleted(project.paypalCaptureId);
+    // trackers-batch answers 200 even when it rejects a tracker; the rejection is in `errors`.
+    if (result.errors?.length) {
+      const reason = JSON.stringify(result.errors).slice(0, 300);
+      recordApproval({ projectId, actionType: 'record_service_completed', payload, ok: false, result });
+      console.error('[PayPal] completion record refused:', reason);
+      return { ok: false, message: `PayPal refused the completion record: ${reason}` };
+    }
+    recordApproval({ projectId, actionType: 'record_service_completed', payload, ok: true, result });
+    addPayPalEvidence({
       projectId,
-      type: 'paypal_completion',
+      type: 'paypal_completion_record',
       title: 'Service recorded as completed in PayPal',
-      content: JSON.stringify({ request: payload, response: result }),
       source: 'paypal_api',
-      provenance: 'system_verified',
+      record: { request: payload, response: result as Record<string, unknown> },
     });
-    advanceStatus(project, 'completed');
+    advanceStatus(project, 'completed_recorded');
     refresh(projectId);
     return { ok: true, message: 'PayPal accepted the completion record.' };
   } catch (error) {
     const message = error instanceof PayPalApiError ? error.message : String(error);
+    recordApproval({ projectId, actionType: 'record_service_completed', payload, ok: false, result: { error: message } });
     return { ok: false, message: `PayPal refused: ${message}` };
   }
 }
 
-// --- Client delivery page ----------------------------------------------------------------
+// --- Client delivery link ----------------------------------------------------------------
 
-export async function acknowledgeDeliveryAction(token: string, form: FormData) {
-  const project = getProjectByToken(token);
-  if (!project) throw new Error('Unknown delivery link');
-  const h = await headers();
-  const name = text(form, 'name') || project.client_name;
-  // Store a hash of the network details, not the details themselves.
-  const fingerprint = sha256(`${h.get('x-forwarded-for') ?? ''}|${h.get('user-agent') ?? ''}`).slice(0, 16);
-  addEvidence({
-    projectId: project.id,
-    type: 'client_acknowledgment',
-    title: `Receipt confirmed by ${name}`,
-    content: JSON.stringify({ confirmedBy: name, confirmedAt: now(), statement: text(form, 'statement'), clientFingerprint: fingerprint }),
-    source: 'delivery_portal',
-    provenance: 'client_confirmed',
-  });
-  advanceStatus(project, 'acknowledged');
-  refresh(project.id);
-  redirect(`/d/${token}?confirmed=1`);
+/**
+ * A secure link for the client (lib/db/delivery.ts): only its hash is stored, so the URL is shown
+ * once, here. Creating a new one revokes the previous link. Same rules as POST
+ * /api/projects/[id]/delivery.
+ */
+export async function createDeliveryLinkAction(projectId: string): Promise<ActionResult> {
+  const project = getProject(projectId);
+  if (!project) return { ok: false, message: 'Project not found.' };
+  if (!listEvidence(projectId).some((e) => e.type === 'delivery_file'))
+    return { ok: false, message: 'Upload the delivered file first: the client acknowledges what is listed on the link.' };
+  const { token, link } = createDeliveryLink(projectId);
+  if (project.status === 'paid') updateProject(projectId, { status: 'delivered' });
+  refresh(projectId);
+  return {
+    ok: true,
+    url: `${await baseUrl()}/deliver/${token}`,
+    message: `Send this link to the client. It is shown only once, expires on ${new Date(link.expiresAt).toLocaleDateString('en-GB')} and replaces any earlier link.`,
+  };
 }
 
 // --- Notices ------------------------------------------------------------------------------
@@ -191,11 +238,9 @@ export async function mapNoticeAction(_prev: { items: NoticeItem[] | null; error
   const project = getProject(text(form, 'projectId'));
   const notice = text(form, 'notice');
   if (!project || !notice) return { items: null, error: 'Choose a project and paste the notice.' };
-  const items = await mapNotice(notice, project, listEvidence(project.id));
-  if (!items) return { items: null, error: 'AI is unavailable right now. Try again, or check the OpenAI key.' };
-  getDb()
-    .prepare('INSERT INTO notices (id, project_id, text, result, created_at) VALUES (?, ?, ?, ?, ?)')
-    .run(newId('ntc'), project.id, notice, JSON.stringify(items), now());
+  const items = await mapNotice(notice, listEvidence(project.id));
+  if (!items) return { items: null, error: 'AI is unavailable right now. Try again in a minute.' };
+  recordNotice({ projectId: project.id, rawText: notice, category: [...new Set(items.map((i) => i.kind))].join(',') || null });
   return { items };
 }
 
@@ -203,9 +248,9 @@ export async function mapNoticeAction(_prev: { items: NoticeItem[] | null; error
 
 export async function sandboxChargebackAction(projectId: string): Promise<ActionResult> {
   const project = getProject(projectId);
-  if (!project?.paypal_capture_id) return { ok: false, message: 'There is no PayPal capture for this project yet.' };
+  if (!project?.paypalCaptureId) return { ok: false, message: 'There is no PayPal capture for this project yet.' };
   try {
-    await sandboxChargeback(project.paypal_capture_id);
+    await sandboxChargeback(project.paypalCaptureId);
     return { ok: true, message: 'Sandbox chargeback requested. PayPal sends a dispute webhook shortly.' };
   } catch (error) {
     return { ok: false, message: String(error) };
@@ -213,12 +258,15 @@ export async function sandboxChargebackAction(projectId: string): Promise<Action
 }
 
 export async function answerDisputeAction(projectId: string, disputeId: string, notes: string): Promise<ActionResult> {
+  const payload = { disputeId, notes };
   try {
     const result = await provideDisputeEvidence(disputeId, notes);
-    recordApproval(projectId, 'provide_dispute_evidence', sha256(JSON.stringify({ disputeId, notes })), result);
+    recordApproval({ projectId, actionType: 'provide_dispute_evidence', payload, ok: true, result });
     refresh(projectId);
     return { ok: true, message: 'Evidence sent to PayPal.' };
   } catch (error) {
+    recordApproval({ projectId, actionType: 'provide_dispute_evidence', payload, ok: false, result: { error: String(error) } });
     return { ok: false, message: String(error) };
   }
 }
+

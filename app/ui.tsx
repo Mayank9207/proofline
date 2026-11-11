@@ -2,18 +2,19 @@
 
 import Link from 'next/link';
 import type { ReactNode } from 'react';
-import { PROVENANCE, type Provenance } from '@/lib/evidence';
+import { PROVENANCE_LABELS } from '@/lib/evidence/labels';
+import type { ProvenanceLevel } from '@/lib/evidence/types';
 
-const PROVENANCE_STYLE: Record<Provenance, string> = {
+const PROVENANCE_STYLE: Record<ProvenanceLevel, string> = {
   system_verified: 'bg-green-100 text-green-800',
   client_confirmed: 'bg-blue-100 text-blue-800',
   self_reported: 'bg-amber-100 text-amber-800',
 };
 
-export function ProvenanceBadge({ value }: { value: Provenance }) {
+export function ProvenanceBadge({ value }: { value: ProvenanceLevel }) {
   return (
     <span className={`rounded px-2 py-0.5 text-xs font-semibold ${PROVENANCE_STYLE[value] ?? 'bg-gray-100'}`}>
-      {PROVENANCE[value] ?? value}
+      {PROVENANCE_LABELS[value] ?? value}
     </span>
   );
 }
@@ -56,7 +57,8 @@ export function Section({ title, children, aside }: { title: string; children: R
   );
 }
 
-export const money = (amount: number, currency = 'USD') =>
-  new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(amount);
+/** Formats an amount in minor units (the backend stores 120000 for 1,200.00). */
+export const money = (minorUnits: number, currency = 'USD') =>
+  new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(minorUnits / 100);
 
 export const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }) : '—');

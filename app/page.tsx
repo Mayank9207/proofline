@@ -1,13 +1,14 @@
 import Link from 'next/link';
 import { connection } from 'next/server';
-import { listProjects, projectPosture } from '@/lib/store';
+import { STATUS_LABELS } from '@/lib/evidence/labels';
+import { listPostures } from '@/lib/store';
 import { createProjectAction } from './actions';
 import { Header, SampleBadge, Section, money } from './ui';
 
 export default async function Home() {
   await connection();
-  const postures = listProjects().map((p) => projectPosture(p));
-  const atRisk = postures.filter((x) => x.project.paid_at && x.gaps.length > 0);
+  const postures = listPostures();
+  const atRisk = postures.filter((x) => x.paid && x.gaps.length > 0);
 
   return (
     <>
@@ -22,7 +23,7 @@ export default async function Home() {
           </p>
           <p className="mt-3 text-sm font-semibold text-pp-danger">
             {atRisk.length} paid project{atRisk.length === 1 ? '' : 's'} missing evidence ·{' '}
-            {money(atRisk.reduce((s, x) => s + x.project.price, 0))} at risk
+            {money(atRisk.reduce((s, x) => s + x.project.amount, 0))} at risk
           </p>
         </div>
 
@@ -39,16 +40,16 @@ export default async function Home() {
               </tr>
             </thead>
             <tbody className="divide-y divide-pp-border">
-              {postures.map(({ project: p, items, gaps, score }) => (
+              {postures.map(({ project: p, evidence, gaps, score, sample }) => (
                 <tr key={p.id}>
                   <td className="py-2">
                     <Link className="font-semibold text-pp-blue hover:underline" href={`/projects/${p.id}`}>{p.title}</Link>{' '}
-                    {p.seeded === 1 && <SampleBadge />}
+                    {sample && <SampleBadge />}
                   </td>
-                  <td>{p.client_name}</td>
-                  <td className="capitalize">{p.status.replace('_', ' ')}</td>
-                  <td className="text-right">{money(p.price, p.currency)}</td>
-                  <td className="text-right">{items.length} · {Math.round(score * 100)}%</td>
+                  <td>{p.clientName}</td>
+                  <td>{STATUS_LABELS[p.status]}</td>
+                  <td className="text-right">{money(p.amount, p.currency)}</td>
+                  <td className="text-right">{evidence.length} · {Math.round(score * 100)}%</td>
                   <td className={gaps.length ? 'text-pp-danger' : 'text-pp-success'}>
                     {gaps.length ? gaps.map((g) => g.label).join(', ') : 'Nothing missing'}
                   </td>
@@ -63,7 +64,7 @@ export default async function Home() {
             <input required name="title" placeholder="Project title" className="rounded border border-pp-border px-3 py-2" />
             <input required name="price" type="number" min="1" step="0.01" placeholder="Price (USD)" className="rounded border border-pp-border px-3 py-2" />
             <input required name="clientName" placeholder="Client name" className="rounded border border-pp-border px-3 py-2" />
-            <input required name="clientEmail" type="email" placeholder="Client email" className="rounded border border-pp-border px-3 py-2" />
+            <input name="clientEmail" type="email" placeholder="Client email (optional)" className="rounded border border-pp-border px-3 py-2" />
             <textarea required name="scope" rows={3} placeholder="Agreed scope: what you will deliver, by when, how many revisions" className="col-span-2 rounded border border-pp-border px-3 py-2" />
             <button className="col-span-2 justify-self-start rounded bg-pp-blue px-4 py-2 font-semibold text-white hover:bg-pp-blue-dark">Create project</button>
           </form>

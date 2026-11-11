@@ -1,22 +1,40 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { connection } from 'next/server';
-import { headers } from 'next/headers';
-import { getProject, projectPosture } from '@/lib/store';
-import { EVIDENCE_TYPES } from '@/lib/evidence';
-import { createDeliveryLinkAction, requestPaymentAction } from '@/app/actions';
+import { getProject } from '@/lib/db/projects';
+import { EVIDENCE_LABELS, STATUS_LABELS } from '@/lib/evidence/labels';
+import { readOriginal } from '@/lib/evidence/storage';
+import type { EvidenceItem } from '@/lib/evidence/types';
+import { isSampleEvidence, projectPosture } from '@/lib/store';
+import { requestPaymentAction } from '@/app/actions';
 import { Header, ProvenanceBadge, SampleBadge, Section, money, when } from '@/app/ui';
-import { AddEvidenceForm, ConfirmPayPalAction } from './forms';
+import { AddEvidenceForm, ConfirmPayPalAction, DeliveryLinkForm } from './forms';
+
+const PREVIEW_CHARS = 400;
+
+/** The start of a stored text original, so the seller sees what was filed. */
+async function preview(e: EvidenceItem): Promise<string | null> {
+  if (!e.storageRef || e.mimeType !== 'text/plain') return null;
+  try {
+    const text = (await readOriginal(e.storageRef)).toString('utf8');
+    return text.length > PREVIEW_CHARS ? `${text.slice(0, PREVIEW_CHARS)}…` : text;
+  } catch {
+    return null;
+  }
+}
+
+type Statement = { speaker: string; quote: string; meaning: string };
+const statementsOf = (facts: unknown): Statement[] =>
+  Array.isArray(facts) ? facts.filter((s): s is Statement => !!s && typeof s === 'object' && typeof (s as Statement).quote === 'string') : [];
 
 export default async function ProjectPage({ params, searchParams }: PageProps<'/projects/[id]'>) {
   await connection();
   const { id } = await params;
   const project = getProject(id);
   if (!project) notFound();
-  const { items, gaps, score } = projectPosture(project);
+  const { evidence, gaps, score, sample } = projectPosture(project);
+  const previews = await Promise.all(evidence.map(preview));
   const paidNow = (await searchParams).paid === '1';
-  const h = await headers();
-  const origin = `${h.get('x-forwarded-proto') ?? 'http'}://${h.get('x-forwarded-host') ?? h.get('host')}`;
 
   return (
     <>
@@ -25,16 +43,16 @@ export default async function ProjectPage({ params, searchParams }: PageProps<'/
         <div className="mt-8 flex items-start justify-between gap-6">
           <div>
             <p className="text-sm text-pp-muted">
-              <Link href="/" className="hover:underline">Projects</Link> / {project.client_name}
+              <Link href="/" className="hover:underline">Projects</Link> / {project.clientName}
             </p>
             <h1 className="mt-1 text-2xl font-semibold text-pp-navy">
-              {project.title} {project.seeded === 1 && <SampleBadge />}
+              {project.title} {sample && <SampleBadge />}
             </h1>
             <p className="mt-2 max-w-2xl text-sm text-pp-muted">{project.scope}</p>
           </div>
           <div className="text-right">
-            <p className="text-2xl font-semibold">{money(project.price, project.currency)}</p>
-            <p className="text-sm capitalize text-pp-muted">{project.status.replace('_', ' ')}</p>
+            <p className="text-2xl font-semibold">{money(project.amount, project.currency)}</p>
+            <p className="text-sm text-pp-muted">{STATUS_LABELS[project.status]}</p>
             <p className={`mt-1 text-sm font-semibold ${gaps.length ? 'text-pp-danger' : 'text-pp-success'}`}>
               Evidence {Math.round(score * 100)}% complete
             </p>
@@ -59,50 +77,42 @@ export default async function ProjectPage({ params, searchParams }: PageProps<'/
 
         <Section title="Actions">
           <div className="flex flex-wrap items-start gap-4 text-sm">
-            {!project.paypal_capture_id && project.seeded === 0 && (
+            {!project.paypalCaptureId && !sample && (
               <form action={requestPaymentAction.bind(null, project.id)}>
                 <button className="rounded bg-pp-blue px-3 py-1.5 font-semibold text-white hover:bg-pp-blue-dark">
-                  {project.paypal_order_id ? 'Open PayPal checkout again' : 'Request payment through PayPal'}
+                  {project.paypalOrderId ? 'Open PayPal checkout again' : 'Request payment through PayPal'}
                 </button>
               </form>
             )}
-            {project.delivery_token ? (
-              <div>
-                <p className="font-semibold">Client delivery link</p>
-                <code className="text-xs break-all">{`${origin}/d/${project.delivery_token}`}</code>
-              </div>
-            ) : (
-              <form action={createDeliveryLinkAction.bind(null, project.id)}>
-                <button className="rounded border border-pp-blue px-3 py-1.5 font-semibold text-pp-blue hover:bg-pp-highlight">Create client delivery link</button>
-              </form>
-            )}
-            {project.paypal_capture_id && (
+            <DeliveryLinkForm projectId={project.id} />
+            {project.paypalCaptureId && (
               <>
-                <ConfirmPayPalAction projectId={project.id} kind="completion" captureId={project.paypal_capture_id} />
-                <ConfirmPayPalAction projectId={project.id} kind="chargeback" captureId={project.paypal_capture_id} />
+                <ConfirmPayPalAction projectId={project.id} kind="completion" captureId={project.paypalCaptureId} />
+                <ConfirmPayPalAction projectId={project.id} kind="chargeback" captureId={project.paypalCaptureId} />
               </>
             )}
           </div>
-          {project.seeded === 1 && (
+          {sample && (
             <p className="mt-3 text-xs text-pp-muted">Sample projects have no real PayPal payment. Create a project to try the PayPal steps.</p>
           )}
         </Section>
 
-        <Section title={`Evidence on file (${items.length})`}>
+        <Section title={`Evidence on file (${evidence.length})`}>
           <ol className="space-y-3 text-sm">
-            {items.map((e) => (
+            {evidence.map((e, i) => (
               <li key={e.id} className="rounded border border-pp-border p-3">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="font-semibold">{e.title}</span>
-                  <span className="text-pp-muted">· {EVIDENCE_TYPES[e.type] ?? e.type}</span>
-                  <ProvenanceBadge value={e.provenance} />
-                  {e.seeded === 1 && <SampleBadge />}
+                  <span className="text-pp-muted">· {EVIDENCE_LABELS[e.type] ?? e.type}</span>
+                  <ProvenanceBadge value={e.provenanceLevel} />
+                  {isSampleEvidence(e) && <SampleBadge />}
                 </div>
                 <p className="mt-1 text-xs text-pp-muted">
-                  {when(e.captured_at)} · source: {e.source} · sha256 <code title={e.sha256}>{e.sha256.slice(0, 16)}…</code>
+                  {when(e.capturedAt)} · source: {e.source}
+                  {e.originalFilename ? ` · ${e.originalFilename}` : ''} · sha256 <code title={e.sha256}>{e.sha256.slice(0, 16)}…</code>
                 </p>
-                <p className="mt-2 whitespace-pre-wrap break-words text-xs">{e.content.length > 400 ? `${e.content.slice(0, 400)}…` : e.content}</p>
-                {e.facts && <Facts facts={e.facts} />}
+                {previews[i] && <p className="mt-2 whitespace-pre-wrap break-words text-xs">{previews[i]}</p>}
+                <Statements items={statementsOf(e.extractedFacts)} />
               </li>
             ))}
           </ol>
@@ -116,12 +126,11 @@ export default async function ProjectPage({ params, searchParams }: PageProps<'/
   );
 }
 
-function Facts({ facts }: { facts: string }) {
-  const statements = JSON.parse(facts) as { speaker: string; quote: string; meaning: string }[];
-  if (!Array.isArray(statements) || statements.length === 0) return null;
+function Statements({ items }: { items: Statement[] }) {
+  if (items.length === 0) return null;
   return (
     <ul className="mt-2 space-y-1 border-l-2 border-pp-blue pl-3 text-xs">
-      {statements.map((s, i) => (
+      {items.map((s, i) => (
         <li key={i}>
           <q className="font-semibold">{s.quote}</q> <span className="text-pp-muted">— {s.speaker}. {s.meaning}</span>
         </li>

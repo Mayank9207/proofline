@@ -1,9 +1,13 @@
 // PayPal webhooks. Each event is signature-checked, stored once by event id (PayPal retries), then
 // applied to the ledger. Unverified events are stored for inspection but never change state.
 
+import { getProject } from '@/lib/db/projects';
+import { recordPayPalEvent } from '@/lib/db/records';
 import { verifyWebhook } from '@/lib/paypal';
 import { recordCapture } from '@/lib/payments';
-import { addEvidence, getProject, getProjectByCapture, recordPayPalEvent } from '@/lib/store';
+import { addPayPalEvidence, getProjectByCapture } from '@/lib/store';
+
+export const dynamic = 'force-dynamic';
 
 type Event = {
   id: string;
@@ -20,6 +24,14 @@ type Event = {
   };
 };
 
+// The project an event is about: captures carry our project id as custom_id, disputes name the capture.
+function projectFor(event: Event) {
+  const r = event.resource ?? {};
+  if (r.custom_id) return getProject(r.custom_id);
+  const captureId = r.disputed_transactions?.[0]?.seller_transaction_id;
+  return captureId ? getProjectByCapture(captureId) : null;
+}
+
 export async function POST(request: Request) {
   const raw = await request.text();
   let event: Event;
@@ -28,36 +40,29 @@ export async function POST(request: Request) {
   } catch {
     return Response.json({ error: 'invalid json' }, { status: 400 });
   }
+  if (!event.id || !event.event_type) return Response.json({ error: 'not a PayPal event' }, { status: 400 });
+
   const verified = await verifyWebhook(request.headers, raw).catch(() => false);
-  const isNew = recordPayPalEvent(event, verified);
-  if (!verified || !isNew) return Response.json({ received: true, verified, duplicate: !isNew });
+  const project = projectFor(event);
+  const isNew = recordPayPalEvent({ id: event.id, eventType: event.event_type, projectId: project?.id ?? null, rawBody: raw, verified });
+  if (!verified || !isNew || !project) return Response.json({ received: true, verified, duplicate: !isNew });
 
   const r = event.resource ?? {};
   switch (event.event_type) {
     case 'PAYMENT.CAPTURE.COMPLETED':
-    case 'PAYMENT.CAPTURE.PENDING': {
-      const project = r.custom_id ? getProject(r.custom_id) : undefined;
-      if (project && r.id && r.amount && r.status) {
-        await recordCapture(project.id, { id: r.id, status: r.status, amount: r.amount });
-      }
+    case 'PAYMENT.CAPTURE.PENDING':
+      if (r.id && r.amount && r.status) await recordCapture(project.id, { id: r.id, status: r.status, amount: r.amount });
       break;
-    }
     case 'CUSTOMER.DISPUTE.CREATED':
-    case 'CUSTOMER.DISPUTE.UPDATED': {
-      const captureId = r.disputed_transactions?.[0]?.seller_transaction_id;
-      const project = captureId ? getProjectByCapture(captureId) : undefined;
-      if (project) {
-        addEvidence({
-          projectId: project.id,
-          type: 'dispute_event',
-          title: `Dispute ${r.dispute_id}: ${r.reason ?? 'opened'} (${r.status ?? ''})`,
-          content: JSON.stringify(r),
-          source: 'paypal_webhook',
-          provenance: 'system_verified',
-        });
-      }
+    case 'CUSTOMER.DISPUTE.UPDATED':
+      addPayPalEvidence({
+        projectId: project.id,
+        type: 'dispute_event',
+        title: `Dispute ${r.dispute_id}: ${r.reason ?? 'opened'} (${r.status ?? ''})`,
+        source: 'paypal_webhook',
+        record: { eventId: event.id, eventType: event.event_type, ...r },
+      });
       break;
-    }
   }
   return Response.json({ received: true, verified: true });
 }
