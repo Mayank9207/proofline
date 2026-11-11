@@ -40,5 +40,5 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# Proofline evidence ledger (local SQLite)
-/data
+# local data (SQLite db, uploaded evidence)
+/data/
