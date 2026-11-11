@@ -21,13 +21,21 @@ const SEEDS: Seed[] = [
   { id: 'p6', title: 'Tarot deck illustrations', clientName: 'Sofia Alvarez', scope: 'Tarot deck illustrations (12 cards)', amount: 180000, status: 'paid', has: ['paypal_payment', 'message'] },
 ];
 
+// Days before seeding at which each kind of evidence was captured, so the timeline and paid dates read
+// like real work: agreed first, then paid, messages, delivered, acknowledged, completion recorded.
+const DAYS_AGO: Partial<Record<EvidenceType, number>> = {
+  scope_agreement: 30, paypal_payment: 24, message: 20, delivery_file: 14, client_acknowledgment: 12, paypal_completion_record: 10,
+};
+const daysAgo = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString();
+
 const conn = db();
 conn.exec('DELETE FROM evidence_items; DELETE FROM projects;');
-for (const s of SEEDS) {
+for (const [i, s] of SEEDS.entries()) {
   createProject({ id: s.id, title: s.title, clientName: s.clientName, clientEmail: `${s.clientName.split(' ')[0].toLowerCase()}@example.com`, scope: s.scope, amount: s.amount, currency: 'USD', status: s.status });
   for (const type of s.has) {
     createEvidence({
       projectId: s.id, type, title: `${type.replace(/_/g, ' ')} (${s.clientName})`, source: type === 'paypal_payment' ? 'seed:paypal' : 'seed',
+      capturedAt: daysAgo((DAYS_AGO[type] ?? 18) - i), // later projects started a day later each
       sha256: calculateSHA256(`seed:${s.id}:${type}`), provenanceLevel: PROV[type] ?? 'self_reported',
     });
   }
