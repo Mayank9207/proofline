@@ -1,41 +1,73 @@
-// Server-side configuration for the AG Studio AI assistant. The OpenAI key is read only here: it is
-// never passed to a client component, and it has no NEXT_PUBLIC_ prefix, so Next.js never inlines it
-// into the browser bundle.
+// Server-side AI configuration: the single place that decides which provider answers.
+//
+// Every AI call (the Studio chat via app/api/ai/chat, and lib/llm.ts) speaks OpenAI-style
+// Chat Completions, which both providers accept, so the browser never needs to know the provider.
+// Gemini wins when GEMINI_API_KEY is set; otherwise OpenAI when an OpenAI key is set; otherwise
+// AI is off. Keys are read only here: nothing has a NEXT_PUBLIC_ prefix, so none reaches the
+// browser bundle.
 
-const DEFAULT_MODELS = ['gpt-5.4-mini'];
+export type AiProvider = 'gemini' | 'openai';
 
-// AG_STUDIO_OPENAI_API_KEY is specific to this app, so a key set for it in .env.local always wins.
-// OPENAI_API_KEY is the fallback, so a key already exported for other tools works with no setup.
-// (Next.js prefers the process environment over .env.local for the same name, which is why the
-// generic name alone couldn't be overridden per project.)
-const KEY_VARIABLES = ['AG_STUDIO_OPENAI_API_KEY', 'OPENAI_API_KEY'] as const;
+export type ChatTarget = {
+  provider: AiProvider;
+  url: string;
+  key: string;
+  model: string;
+};
 
-let loggedKeySource = false;
+const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
+const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
+const DEFAULT_GEMINI_MODEL = 'gemini-3.6-flash';
+const DEFAULT_OPENAI_MODEL = 'gpt-5.4-mini';
 
-/** The OpenAI key for the assistant, or undefined when none is configured. */
-export function openAiKey(): string | undefined {
-  const variable = KEY_VARIABLES.find((name) => process.env[name]);
-  if (!loggedKeySource) {
-    loggedKeySource = true;
-    console.log(
-      variable
-        ? `[AI] AG Studio assistant enabled, using the OpenAI key from ${variable}`
-        : `[AI] AG Studio assistant disabled: set AG_STUDIO_OPENAI_API_KEY in .env.local to enable it`,
+let logged = false;
+
+/** Where Chat Completions requests go, or undefined when no key is configured. */
+export function chatTarget(): ChatTarget | undefined {
+  const geminiKey = process.env.GEMINI_API_KEY;
+  // AG_STUDIO_OPENAI_API_KEY wins over the generic OPENAI_API_KEY so a project key in .env.local
+  // can't be shadowed by one exported in the shell.
+  const openAiKey = process.env.AG_STUDIO_OPENAI_API_KEY || process.env.OPENAI_API_KEY;
+
+  const target: ChatTarget | undefined = geminiKey
+    ? { provider: 'gemini', url: GEMINI_URL, key: geminiKey, model: process.env.GEMINI_MODEL?.trim() || DEFAULT_GEMINI_MODEL }
+    : openAiKey
+      ? {
+          provider: 'openai',
+          url: OPENAI_URL,
+          key: openAiKey,
+          model: (process.env.OPENAI_MODELS ?? '').split(',')[0]?.trim() || DEFAULT_OPENAI_MODEL,
+        }
+      : undefined;
+
+  if (!logged) {
+    logged = true;
+    console.log(target ? `[AI] provider: ${target.provider}, model: ${target.model}` : '[AI] disabled: set GEMINI_API_KEY in .env.local');
+  }
+  return target;
+}
+
+/** The Studio chat is shown only when a provider is configured. */
+export const aiEnabled = () => chatTarget() !== undefined;
+
+/**
+ * Adjust a Chat Completions body for the provider. Gemini attaches `extra_content` (its thought
+ * signature) to tool calls and needs it back; OpenAI rejects that field, and newer OpenAI models
+ * take `max_completion_tokens` instead of `max_tokens`.
+ */
+export function forProvider(target: ChatTarget, body: Record<string, unknown>, maxTokens: number): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...body, model: target.model };
+  if (target.provider === 'gemini') {
+    out.max_tokens = maxTokens;
+    return out;
+  }
+  out.max_completion_tokens = maxTokens;
+  if (Array.isArray(out.messages)) {
+    out.messages = (out.messages as Record<string, unknown>[]).map((m) =>
+      Array.isArray(m.tool_calls)
+        ? { ...m, tool_calls: (m.tool_calls as Record<string, unknown>[]).map(({ extra_content: _drop, ...call }) => call) }
+        : m,
     );
   }
-  return variable && process.env[variable];
-}
-
-/** The OpenAI models the assistant may use, from OPENAI_MODELS (comma-separated). The first is the default. */
-export function aiModels(): string[] {
-  const models = (process.env.OPENAI_MODELS ?? '')
-    .split(',')
-    .map((id) => id.trim())
-    .filter(Boolean);
-  return models.length > 0 ? models : DEFAULT_MODELS;
-}
-
-/** The assistant is shown only when a key is configured. */
-export function aiEnabled(): boolean {
-  return Boolean(openAiKey());
+  return out;
 }
