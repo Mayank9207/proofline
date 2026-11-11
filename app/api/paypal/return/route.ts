@@ -7,9 +7,11 @@ import { captureOrder, getOrder, PayPalApiError } from '@/lib/paypal';
 import { recordCapture } from '@/lib/payments';
 import { getProjectByOrder } from '@/lib/store';
 
+export const dynamic = 'force-dynamic';
+
 export async function GET(request: NextRequest) {
   const orderId = request.nextUrl.searchParams.get('token');
-  const project = orderId ? getProjectByOrder(orderId) : undefined;
+  const project = orderId ? getProjectByOrder(orderId) : null;
   if (!orderId || !project) redirect('/');
 
   let order;

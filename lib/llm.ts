@@ -6,20 +6,19 @@
 // from that store, which makes demos repeatable and lets the app run with AI_MODE=replay and no
 // key: recorded answers are served, anything new returns null and the UI says AI is unavailable.
 
-import { getDb, now } from './db';
+import { getAiRun, saveAiRun } from './db/records';
 import { chatTarget, forProvider } from './ai';
 import { sanitizeSchema } from './gemini-schema';
-import { sha256 } from './evidence';
+import { calculateSHA256 } from './evidence/hash';
 
 type JsonSchema = Record<string, unknown>;
 
 export async function structured<T>(task: string, instructions: string, input: string, schema: JsonSchema): Promise<T | null> {
   const target = chatTarget();
   const model = target?.model ?? 'none';
-  const key = sha256(JSON.stringify({ task, model, instructions, input }));
-  const db = getDb();
-  const cached = db.prepare('SELECT output FROM ai_runs WHERE input_sha256 = ?').get(key) as { output: string } | undefined;
-  if (cached) return JSON.parse(cached.output) as T;
+  const key = calculateSHA256(JSON.stringify({ task, model, instructions, input }));
+  const cached = getAiRun(key);
+  if (cached) return JSON.parse(cached) as T;
   if (process.env.AI_MODE === 'replay' || !target) return null;
 
   // Gemini needs the schema reduced to the subset it accepts; OpenAI takes it strictly as written.
@@ -38,11 +37,18 @@ export async function structured<T>(task: string, instructions: string, input: s
     },
     4000,
   );
-  const res = await fetch(target.url, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${target.key}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
+  let res: Response;
+  try {
+    res = await fetch(target.url, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${target.key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(60_000),
+    });
+  } catch (error) {
+    console.error(`[AI] ${task} failed: ${String(error)}`);
+    return null;
+  }
   if (!res.ok) {
     console.error(`[AI] ${task} failed (${target.provider} ${res.status}): ${(await res.text()).slice(0, 300)}`);
     return null;
@@ -51,10 +57,15 @@ export async function structured<T>(task: string, instructions: string, input: s
   // Gemini sometimes wraps JSON in a code fence.
   const text = json.choices?.[0]?.message?.content?.trim().replace(/^```(?:json)?\s*/i, '').replace(/```$/, '').trim();
   if (!text) return null;
-  db.prepare('INSERT OR REPLACE INTO ai_runs (input_sha256, task, model, output, created_at) VALUES (?, ?, ?, ?, ?)').run(
-    key, task, model, text, now(),
-  );
-  return JSON.parse(text) as T;
+  let parsed: T;
+  try {
+    parsed = JSON.parse(text) as T;
+  } catch {
+    console.error(`[AI] ${task}: the model did not return valid JSON`);
+    return null;
+  }
+  saveAiRun({ key, kind: task, model, input, output: text });
+  return parsed;
 }
 
 /** Keep only quotes that appear word for word in the source; the AI cannot cite what isn't there. */
