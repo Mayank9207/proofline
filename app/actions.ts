@@ -20,7 +20,7 @@ import { EVIDENCE_LABELS } from '@/lib/evidence/labels';
 import { provenanceFor, type IngestChannel } from '@/lib/evidence/provenance';
 import { ALLOWED_MIME, MAX_UPLOAD_BYTES, storeOriginal } from '@/lib/evidence/storage';
 import { extractEvidence, mapNotice, type NoticeItem } from '@/lib/ai-tasks';
-import { createOrder, recordServiceCompleted, sandboxChargeback, provideDisputeEvidence, PayPalApiError } from '@/lib/paypal';
+import { assertDisputeOnCapture, createOrder, recordServiceCompleted, sandboxChargeback, provideDisputeEvidence, PayPalApiError } from '@/lib/paypal';
 import { addPayPalEvidence, advanceStatus, major } from '@/lib/store';
 
 type FreelancerType = (typeof FREELANCER_EVIDENCE_TYPES)[number];
@@ -251,22 +251,42 @@ export async function sandboxChargebackAction(projectId: string): Promise<Action
   if (!project?.paypalCaptureId) return { ok: false, message: 'There is no PayPal capture for this project yet.' };
   try {
     await sandboxChargeback(project.paypalCaptureId);
-    return { ok: true, message: 'Sandbox chargeback requested. PayPal sends a dispute webhook shortly.' };
+    refresh(projectId);
+    return { ok: true, message: 'Sandbox chargeback requested. PayPal opens the dispute within a few minutes: refresh this page to see it under PayPal disputes.' };
   } catch (error) {
-    return { ok: false, message: String(error) };
+    return { ok: false, message: error instanceof PayPalApiError ? `PayPal refused: ${error.message}` : String(error) };
   }
 }
 
-export async function answerDisputeAction(projectId: string, disputeId: string, notes: string): Promise<ActionResult> {
-  const payload = { disputeId, notes };
+/**
+ * Send the seller's approved notes to PayPal as proof of fulfillment (bound to project and dispute;
+ * the notes come from the form). The approval stores the sha256 of exactly what was sent, and a
+ * PayPal acceptance is filed as dispute evidence on the project.
+ */
+export async function answerDisputeAction(projectId: string, disputeId: string, _prev: ActionResult | null, form: FormData): Promise<ActionResult> {
+  const project = getProject(projectId);
+  if (!project?.paypalCaptureId) return { ok: false, message: 'There is no PayPal payment for this project.' };
+  const notes = text(form, 'notes').slice(0, 2000);
+  if (!notes) return { ok: false, message: 'Write the notes PayPal should read first.' };
+
+  const payload = { disputeId, evidences: [{ evidence_type: 'PROOF_OF_FULFILLMENT', notes }] };
   try {
+    await assertDisputeOnCapture(disputeId, project.paypalCaptureId);
     const result = await provideDisputeEvidence(disputeId, notes);
     recordApproval({ projectId, actionType: 'provide_dispute_evidence', payload, ok: true, result });
+    addPayPalEvidence({
+      projectId,
+      type: 'dispute_event',
+      title: `Evidence sent to PayPal for dispute ${disputeId}`,
+      source: 'paypal_api',
+      record: { request: payload, response: result as Record<string, unknown> },
+    });
     refresh(projectId);
-    return { ok: true, message: 'Evidence sent to PayPal.' };
+    return { ok: true, message: 'PayPal accepted the evidence. A record of what was sent is now on file.' };
   } catch (error) {
-    recordApproval({ projectId, actionType: 'provide_dispute_evidence', payload, ok: false, result: { error: String(error) } });
-    return { ok: false, message: String(error) };
+    const message = error instanceof PayPalApiError ? `PayPal refused: ${error.message}` : error instanceof Error ? error.message : String(error);
+    recordApproval({ projectId, actionType: 'provide_dispute_evidence', payload, ok: false, result: { error: message } });
+    return { ok: false, message };
   }
 }
 

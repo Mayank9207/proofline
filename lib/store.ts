@@ -52,6 +52,22 @@ export function addPayPalEvidence(e: { projectId: string; type: EvidenceType; ti
   });
 }
 
+/**
+ * Draft notes for a PayPal dispute: the evidence on file, oldest first, each with its provenance and
+ * fingerprint. The seller edits them before anything is sent. Earlier dispute records are left out.
+ */
+export function disputeNotes(project: Project, evidence: EvidenceItem[] = listEvidence(project.id)): string {
+  const lines = evidence
+    .filter((e) => e.type !== 'dispute_event')
+    .sort((a, b) => a.capturedAt.localeCompare(b.capturedAt))
+    .map((e) => `- ${e.capturedAt.slice(0, 10)} · ${EVIDENCE_LABELS[e.type]} · ${PROVENANCE_LABELS[e.provenanceLevel]} · sha256 ${e.sha256.slice(0, 16)}: ${e.title}`);
+  return [
+    `Proof of fulfillment for "${project.title}"${project.scope && project.scope !== project.title ? ` (${project.scope})` : ''},${major(project.amount).toFixed(2)} ${project.currency} paid by ${project.clientName}.`,
+    'The work was agreed, delivered and recorded as follows. Each item was fingerprinted (SHA-256) when it was captured and can be produced on request:',
+    ...(lines.length ? lines : ['- No evidence on file yet.']),
+  ].join('\n');
+}
+
 // --- Posture -----------------------------------------------------------------------------------
 
 export type Gap = { type: EvidenceType; label: string; nextStep: string };
