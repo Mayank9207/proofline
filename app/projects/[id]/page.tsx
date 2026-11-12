@@ -5,10 +5,11 @@ import { getProject } from '@/lib/db/projects';
 import { EVIDENCE_LABELS, STATUS_LABELS } from '@/lib/evidence/labels';
 import { readOriginal } from '@/lib/evidence/storage';
 import type { EvidenceItem } from '@/lib/evidence/types';
-import { isSampleEvidence, projectPosture } from '@/lib/store';
+import { disputesForCapture, type Dispute } from '@/lib/paypal';
+import { disputeNotes, isSampleEvidence, projectPosture } from '@/lib/store';
 import { requestPaymentAction } from '@/app/actions';
 import { Header, ProvenanceBadge, SampleBadge, Section, money, when } from '@/app/ui';
-import { AddEvidenceForm, ConfirmPayPalAction, DeliveryLinkForm } from './forms';
+import { AddEvidenceForm, ConfirmPayPalAction, DeliveryLinkForm, DisputeAnswerForm } from './forms';
 
 const PREVIEW_CHARS = 400;
 
@@ -24,6 +25,18 @@ async function preview(e: EvidenceItem): Promise<string | null> {
 }
 
 type Statement = { speaker: string; quote: string; meaning: string };
+/** Disputes on the project's payment, read from PayPal on each visit; a failed read is shown, not hidden. */
+async function loadDisputes(captureId: string | null): Promise<{ items: Dispute[]; error?: string } | null> {
+  if (!captureId) return null;
+  try {
+    return { items: await disputesForCapture(captureId) };
+  } catch (error) {
+    return { items: [], error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+const words = (code?: string) => (code ? code.charAt(0) + code.slice(1).toLowerCase().replace(/_/g, ' ') : '');
+
 const statementsOf = (facts: unknown): Statement[] =>
   Array.isArray(facts) ? facts.filter((s): s is Statement => !!s && typeof s === 'object' && typeof (s as Statement).quote === 'string') : [];
 
@@ -35,6 +48,7 @@ export default async function ProjectPage({ params, searchParams }: PageProps<'/
   const { evidence, gaps, score, sample } = projectPosture(project);
   const previews = await Promise.all(evidence.map(preview));
   const paidNow = (await searchParams).paid === '1';
+  const disputes = await loadDisputes(project.paypalCaptureId);
 
   return (
     <>
@@ -96,6 +110,34 @@ export default async function ProjectPage({ params, searchParams }: PageProps<'/
             <p className="mt-3 text-xs text-pp-muted">Sample projects have no real PayPal payment. Create a project to try the PayPal steps.</p>
           )}
         </Section>
+
+        {disputes && (
+          <Section title={`PayPal disputes (${disputes.items.length})`}>
+            {disputes.error ? (
+              <p className="text-sm text-pp-danger">Could not read disputes from PayPal: {disputes.error}</p>
+            ) : disputes.items.length === 0 ? (
+              <p className="text-sm text-pp-muted">No disputes on this payment.</p>
+            ) : (
+              <ul className="space-y-3 text-sm">
+                {disputes.items.map((d) => (
+                  <li key={d.dispute_id} className="rounded border border-pp-border p-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-semibold">{words(d.reason)}</span>
+                      <span className="rounded bg-pp-canvas px-2 py-0.5 text-xs">{words(d.status)}</span>
+                    </div>
+                    <p className="mt-1 text-xs text-pp-muted">
+                      {d.dispute_id}
+                      {d.dispute_amount ? ` · ${d.dispute_amount.value} ${d.dispute_amount.currency_code}` : ''}
+                      {d.create_time ? ` · opened ${when(d.create_time)}` : ''}
+                      {d.seller_response_due_date ? ` · respond by ${when(d.seller_response_due_date)}` : ''}
+                    </p>
+                    {d.status !== 'RESOLVED' && <DisputeAnswerForm projectId={project.id} disputeId={d.dispute_id} draft={disputeNotes(project, evidence)} />}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Section>
+        )}
 
         <Section title={`Evidence on file (${evidence.length})`}>
           <ol className="space-y-3 text-sm">

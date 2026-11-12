@@ -1,7 +1,7 @@
 'use client';
 
 import { useActionState, useState } from 'react';
-import { addEvidenceAction, createDeliveryLinkAction, recordCompletionAction, sandboxChargebackAction, type ActionResult } from '@/app/actions';
+import { addEvidenceAction, answerDisputeAction, createDeliveryLinkAction, recordCompletionAction, sandboxChargebackAction, type ActionResult } from '@/app/actions';
 import { FREELANCER_EVIDENCE_TYPES } from '@/lib/contracts';
 import { EVIDENCE_LABELS } from '@/lib/evidence/labels';
 
@@ -97,5 +97,52 @@ export function ConfirmPayPalAction({
         </form>
       )}
     </div>
+  );
+}
+
+// Answering a dispute: the seller edits the drafted notes, sees the exact request, then approves it.
+export function DisputeAnswerForm({ projectId, disputeId, draft }: { projectId: string; disputeId: string; draft: string }) {
+  const [open, setOpen] = useState(false);
+  const [notes, setNotes] = useState(draft);
+  const [state, action, pending] = useActionState(answerDisputeAction.bind(null, projectId, disputeId), null);
+  const payload = `POST /v1/customer/disputes/${disputeId}/provide-evidence\n${JSON.stringify(
+    { evidences: [{ evidence_type: 'PROOF_OF_FULFILLMENT', notes: notes.trim() }] },
+    null,
+    2,
+  )}`;
+
+  if (!open)
+    return (
+      <button onClick={() => setOpen(true)} className="mt-3 rounded bg-pp-blue px-3 py-1.5 text-sm font-semibold text-white hover:bg-pp-blue-dark">
+        Answer with the evidence on file
+      </button>
+    );
+  return (
+    <form action={action} className="mt-3 grid gap-3 rounded border border-pp-border bg-pp-canvas p-3 text-sm">
+      <label className="grid gap-1">
+        <span className="font-semibold">Notes for PayPal (drafted from your evidence; edit freely, up to 2,000 characters)</span>
+        <textarea
+          name="notes"
+          rows={8}
+          maxLength={2000}
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          className="rounded border border-pp-border bg-white px-3 py-2 font-mono text-xs"
+        />
+      </label>
+      <div>
+        <p className="font-semibold">This will send to PayPal:</p>
+        <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap text-xs">{payload}</pre>
+      </div>
+      <div className="flex gap-2">
+        <button disabled={pending || !notes.trim() || state?.ok} className="rounded bg-pp-blue px-3 py-1.5 font-semibold text-white disabled:opacity-50">
+          {pending ? 'Sending…' : state?.ok ? 'Sent' : 'Approve and send'}
+        </button>
+        <button type="button" onClick={() => setOpen(false)} className="rounded px-3 py-1.5 text-pp-muted">
+          Cancel
+        </button>
+      </div>
+      <Message state={state} />
+    </form>
   );
 }

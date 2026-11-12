@@ -349,6 +349,27 @@ export const listDisputes = () =>
 
 export const getDispute = (id: string) => get<Dispute>(`/v1/customer/disputes/${id}`);
 
+const isOnCapture = (d: Dispute, captureId: string) =>
+  d.disputed_transactions?.some((t) => t.seller_transaction_id === captureId) ?? false;
+
+/**
+ * Disputes on one capture, read straight from PayPal so the page works without the webhook. The
+ * sandbox rejects the `disputed_transaction_id` filter, so this lists recent disputes and matches
+ * the transaction here, fetching details only for summaries that do not name it.
+ */
+export async function disputesForCapture(captureId: string): Promise<Dispute[]> {
+  const recent = (await listDisputes()).slice(0, 20);
+  const full = await Promise.all(recent.map((d) => (d.disputed_transactions ? d : getDispute(d.dispute_id))));
+  return full.filter((d) => isOnCapture(d, captureId));
+}
+
+/** Throws unless the dispute is about this capture, so a seller can only answer their own. */
+export async function assertDisputeOnCapture(disputeId: string, captureId: string) {
+  const dispute = await getDispute(disputeId);
+  if (!isOnCapture(dispute, captureId)) throw new Error('This dispute is not about this project’s payment.');
+  return dispute;
+}
+
 /** Sandbox only: open a chargeback on a captured transaction, for demos. */
 export const sandboxChargeback = (captureId: string, reason = 'MERCHANDISE_OR_SERVICE_NOT_RECEIVED') =>
   send<unknown>('POST', '/v2/customer-support/process-chargeback', {
