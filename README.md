@@ -9,6 +9,46 @@
 > 
 > https://paypalaihackathon.devpost.com
 
+## Run Proofline (start here)
+
+Proofline turns PayPal payments into dispute-ready proof for freelancers: verified payments, hashed evidence with tracked provenance, client acknowledgments, and an AI investigator whose PayPal actions need human approval. The sections below this one describe the underlying PayPal data pages.
+
+### Run locally
+
+Requires Node.js 20.9 or later (Node 22 recommended) and a free PayPal Sandbox REST app ([developer.paypal.com](https://developer.paypal.com/dashboard/applications/sandbox)).
+
+```bash
+npm install
+cp env.example .env.local   # fill in at least PAYPAL_CLIENT_ID and PAYPAL_SECRET
+npm run seed                # creates data/proofline.db with six sample projects (wipes existing data)
+npm run dev                 # http://localhost:3000
+```
+
+Open `/projects` for the project list and `/dashboard` for the AG Studio dashboard. The SQLite database and uploaded evidence live in `data/` (git-ignored). If you pull a version with a changed schema, delete `data/` and run `npm run seed` again.
+
+| Variable | Needed for |
+|---|---|
+| `PAYPAL_CLIENT_ID`, `PAYPAL_SECRET` | Every PayPal call (Sandbox app credentials). Enable Invoicing, Transaction search and Customer disputes on the app. |
+| `PAYPAL_WEBHOOK_ID` | Verifying PayPal webhooks (see below). Without it, webhook events are ignored. |
+| `AG_STUDIO` | AG Studio licence key for `/dashboard`. |
+| `AG_STUDIO_OPENAI_API_KEY` or `GEMINI_API_KEY` + `GEMINI_MODEL` | The AI features. |
+
+### Verified payments via webhooks
+
+PayPal can only call a public URL, so register one for your Sandbox app (Apps & Credentials, Sandbox, your app, Webhooks, Add Webhook):
+
+- URL: `https://<your-host>/api/webhooks/paypal` (locally, use a tunnel such as `cloudflared tunnel --url http://localhost:3000`)
+- Events: `PAYMENT.CAPTURE.COMPLETED`, `PAYMENT.CAPTURE.PENDING`, `CUSTOMER.DISPUTE.CREATED`, `CUSTOMER.DISPUTE.UPDATED`
+
+Copy the Webhook ID PayPal shows into `PAYPAL_WEBHOOK_ID` and restart. Every event's signature is verified with PayPal before anything is stored or applied, and each event id is stored once, so retries are harmless. Test payments with a Sandbox personal (buyer) account from the same developer dashboard.
+
+### Deploy on Render
+
+[`render.yaml`](render.yaml) is a Render Blueprint: **New, Blueprint, select this repo**, fill in the secrets, deploy. It attaches a persistent disk at `/var/data` and sets `PROOFLINE_DATA_DIR` to it. The disk matters: without one, Render's filesystem is wiped on every deploy and the database goes with it. Persistent disks require a paid instance type. After the first deploy:
+
+1. In the service's Shell, run `npm run seed` once to create the sample projects. Don't run it again unless you want to wipe the data.
+2. Register the webhook above with your `https://<service>.onrender.com/api/webhooks/paypal` URL, put the ID in `PAYPAL_WEBHOOK_ID`, and redeploy.
+
 # PayPal SDK data pages
 
 A Next.js app that reads PayPal sandbox data over the [PayPal REST API](https://developer.paypal.com/api/rest/) and shows it two ways:

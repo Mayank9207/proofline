@@ -1,0 +1,42 @@
+# Render Blueprint: deploys Proofline as one web service with a persistent disk.
+# Dashboard -> New -> Blueprint -> pick this repo. Secrets marked `sync: false` are asked for on first deploy.
+#
+# The disk is essential: Proofline stores its SQLite database and uploaded evidence files under
+# PROOFLINE_DATA_DIR. Without a disk, Render wipes the filesystem on every deploy and all data is lost.
+# Persistent disks need a paid instance type (starter or above).
+services:
+  - type: web
+    name: proofline
+    runtime: node
+    plan: starter
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start
+    healthCheckPath: /api/projects
+    disk:
+      name: proofline-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: PROOFLINE_DATA_DIR
+        value: /var/data
+      # PayPal Sandbox app credentials (developer.paypal.com -> Apps & Credentials -> Sandbox).
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_SECRET
+        sync: false
+      # Webhook ID shown by PayPal after you add https://<this-service>.onrender.com/api/webhooks/paypal
+      # to the SAME app as the credentials above. Set it after the first deploy, then redeploy.
+      - key: PAYPAL_WEBHOOK_ID
+        sync: false
+      - key: AG_STUDIO
+        sync: false
+      - key: AG_STUDIO_OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODELS
+        value: gpt-5.6-terra,gpt-5.6-luna,gpt-5.6-sol
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        sync: false
