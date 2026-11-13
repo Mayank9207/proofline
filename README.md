@@ -1,6 +1,6 @@
 
 
-## Run Proofline (start here)
+## Run Proofline 
 
 Proofline turns PayPal payments into dispute-ready proof for freelancers: verified payments, hashed evidence with tracked provenance, client acknowledgments, and an AI investigator whose PayPal actions need human approval. The sections below this one describe the underlying PayPal data pages.
 
